@@ -1,0 +1,1347 @@
+// =============================================================================
+// FILE: cim_submodules.v
+// DESC: All leaf submodules for the 8-bit CIM (Compute-In-Memory) MAC Core.
+//       Follows the architecture diagram:
+//         SRAM Control → SRAM Array → Current Compensation → FS-GDI Adder
+//         CIM Control  → Auto-Switch Write-Back → SRAM Array
+//       Verilator-compatible, fully synthesizable (no delays, no $display).
+// =============================================================================
+`timescale 1ns / 1ps
+
+// -----------------------------------------------------------------------------
+// MODULE 1: sram_8x8_array
+//   8 rows × 8-bit synchronous SRAM with:
+//     - One write port (one-hot WA)
+//     - One normal read port (one-hot WL → BL)
+//     - Two CIM read ports for dual-row activation (WL_A, WL_B → BL_A, BL_B)
+// -----------------------------------------------------------------------------
+module sram_8x8_array (
+    input  wire        clk,
+    input  wire        rst_n,
+    // Write interface
+    input  wire [7:0]  WA,          // One-hot write row select
+    input  wire [7:0]  write_bus,   // 8-bit write data
+    input  wire        wr_en,       // Write enable (active-high)
+    // Normal read (one-hot row select)
+    input  wire [7:0]  WL,          // One-hot read row select
+    output reg  [7:0]  BL,          // Bit-lines: data of selected row
+    // CIM dual-row read (augend row)
+    input  wire [7:0]  WL_A,        // One-hot: augend row
+    output reg  [7:0]  BL_A,        // Augend row data
+    // CIM dual-row read (addend row)
+    input  wire [7:0]  WL_B,        // One-hot: addend row
+    output reg  [7:0]  BL_B         // Addend row data
+);
+    // Storage: 8 rows of 8 bits
+    reg [7:0] mem [0:7];
+
+    // ---- Synchronous Write ----
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mem[0] <= 8'h00; mem[1] <= 8'h00;
+            mem[2] <= 8'h00; mem[3] <= 8'h00;
+            mem[4] <= 8'h00; mem[5] <= 8'h00;
+            mem[6] <= 8'h00; mem[7] <= 8'h00;
+        end else if (wr_en) begin
+            if (WA[0]) mem[0] <= write_bus;
+            if (WA[1]) mem[1] <= write_bus;
+            if (WA[2]) mem[2] <= write_bus;
+            if (WA[3]) mem[3] <= write_bus;
+            if (WA[4]) mem[4] <= write_bus;
+            if (WA[5]) mem[5] <= write_bus;
+            if (WA[6]) mem[6] <= write_bus;
+            if (WA[7]) mem[7] <= write_bus;
+        end
+    end
+
+    // ---- Combinational Normal Read ----
+    always @(*) begin
+        if      (WL[0]) BL = mem[0];
+        else if (WL[1]) BL = mem[1];
+        else if (WL[2]) BL = mem[2];
+        else if (WL[3]) BL = mem[3];
+        else if (WL[4]) BL = mem[4];
+        else if (WL[5]) BL = mem[5];
+        else if (WL[6]) BL = mem[6];
+        else if (WL[7]) BL = mem[7];
+        else            BL = 8'h00;
+    end
+
+    // ---- Combinational CIM Read: Augend Row ----
+    always @(*) begin
+        if      (WL_A[0]) BL_A = mem[0];
+        else if (WL_A[1]) BL_A = mem[1];
+        else if (WL_A[2]) BL_A = mem[2];
+        else if (WL_A[3]) BL_A = mem[3];
+        else if (WL_A[4]) BL_A = mem[4];
+        else if (WL_A[5]) BL_A = mem[5];
+        else if (WL_A[6]) BL_A = mem[6];
+        else if (WL_A[7]) BL_A = mem[7];
+        else              BL_A = 8'h00;
+    end
+
+    // ---- Combinational CIM Read: Addend Row ----
+    always @(*) begin
+        if      (WL_B[0]) BL_B = mem[0];
+        else if (WL_B[1]) BL_B = mem[1];
+        else if (WL_B[2]) BL_B = mem[2];
+        else if (WL_B[3]) BL_B = mem[3];
+        else if (WL_B[4]) BL_B = mem[4];
+        else if (WL_B[5]) BL_B = mem[5];
+        else if (WL_B[6]) BL_B = mem[6];
+        else if (WL_B[7]) BL_B = mem[7];
+        else              BL_B = 8'h00;
+    end
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 2: row_decoder_3to8
+//   3-bit binary address → 8-bit one-hot word-line
+// -----------------------------------------------------------------------------
+module row_decoder_3to8 (
+    input  wire [2:0] addr,
+    output reg  [7:0] WL
+);
+    always @(*) begin
+        case (addr)
+            3'd0: WL = 8'b0000_0001;
+            3'd1: WL = 8'b0000_0010;
+            3'd2: WL = 8'b0000_0100;
+            3'd3: WL = 8'b0000_1000;
+            3'd4: WL = 8'b0001_0000;
+            3'd5: WL = 8'b0010_0000;
+            3'd6: WL = 8'b0100_0000;
+            3'd7: WL = 8'b1000_0000;
+            default: WL = 8'h00;
+        endcase
+    end
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 3: col_decoder_3to8
+//   3-bit binary address → 8-bit one-hot column enable
+// -----------------------------------------------------------------------------
+module col_decoder_3to8 (
+    input  wire [2:0] WS,
+    output reg  [7:0] Col_EN
+);
+    always @(*) begin
+        case (WS)
+            3'd0: Col_EN = 8'b0000_0001;
+            3'd1: Col_EN = 8'b0000_0010;
+            3'd2: Col_EN = 8'b0000_0100;
+            3'd3: Col_EN = 8'b0000_1000;
+            3'd4: Col_EN = 8'b0001_0000;
+            3'd5: Col_EN = 8'b0010_0000;
+            3'd6: Col_EN = 8'b0100_0000;
+            3'd7: Col_EN = 8'b1000_0000;
+            default: Col_EN = 8'h00;
+        endcase
+    end
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 4: col_selector_8to1
+//   Selects one bit from 8-bit bitline vector using one-hot enable
+// -----------------------------------------------------------------------------
+module col_selector_8to1 (
+    input  wire [7:0] bitlines,
+    input  wire [7:0] sel_en,
+    output wire       data_out
+);
+    assign data_out = |(bitlines & sel_en);
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 5: current_comp  (Current Compensation Circuit)
+//
+//   Digital RTL model of the analog sense-amplifier / current-mirror that
+//   resolves dual-activated bitline currents into two digital words:
+//
+//     CAND[i] = 1  iff  BL_A[i]=1  AND  BL_B[i]=1
+//               (both cells discharge → strongest pull-down)
+//
+//     CNOR[i] = 1  iff  BL_A[i]=0  AND  BL_B[i]=0
+//               (neither cell discharges → NOR condition)
+//
+//   Note: CAND[i] and CNOR[i] are MUTUALLY EXCLUSIVE — they cannot
+//         both be 1 for the same bit position. This property is used
+//         to simplify the carry logic in rrcam_cell.
+// -----------------------------------------------------------------------------
+module current_comp (
+    input  wire [7:0] BL_A,
+    input  wire [7:0] BL_B,
+    output wire [7:0] CAND,   // AND of both rows
+    output wire [7:0] CNOR    // NOR of both rows
+);
+    assign CAND = BL_A & BL_B;
+    assign CNOR = ~(BL_A | BL_B);
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 6: rrcam_cell  (FS-GDI Ripple-Carry Adder Cell)
+//
+//   One bit of the XNOR-accumulate chain used for CIM MAC operations.
+//
+//   Since CAND & CNOR == 0 (mutually exclusive), define:
+//     P[i] = CAND[i] XOR CNOR[i]  =  CAND[i] OR CNOR[i]  =  XNOR(A[i], B[i])
+//
+//   Full-adder on (P, CB, CI):
+//     SUMx = P  XOR CB  XOR CI
+//     COx  = (P AND CB) OR (CI AND (P XOR CB))
+//
+//   This correctly computes XNOR-popcount accumulation used in Binary NNs
+//   where: XNOR(weight, input) substitutes for 1-bit multiplication.
+// -----------------------------------------------------------------------------
+module rrcam_cell (
+    input  wire CANDx,   // CAND bit i
+    input  wire CNORx,   // CNOR bit i
+    input  wire CBx,     // Column Bias (accumulate operand) bit i
+    input  wire CIx,     // Carry in
+    output wire SUMx,    // Sum bit i
+    output wire COx      // Carry out
+);
+    // P = XNOR(row_A[i], row_B[i])
+    // Since CAND & CNOR are mutually exclusive: P = CAND | CNOR = CAND ^ CNOR
+    wire Px;
+    assign Px   = CANDx ^ CNORx;
+    // Corrected full-adder carry: (P&CB) | (CI & (P^CB))
+    assign SUMx = Px ^ CBx ^ CIx;
+    assign COx  = (Px & CBx) | (CIx & (Px ^ CBx));
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 7: rrcam_8bit  (FS-GDI 8-bit Ripple-Carry Adder)
+//
+//   Chains 8 rrcam_cell instances to produce an 8-bit XNOR-accumulate result.
+//   Carry ripples from bit 0 (LSB) to bit 7 (MSB).
+//
+//   Ports:
+//     CAND[7:0]  — AND of the two activated SRAM rows (from current_comp)
+//     CNOR[7:0]  — NOR of the two activated SRAM rows (from current_comp)
+//     CB[7:0]    — Column Bias / accumulator value
+//     SUM[7:0]   — 8-bit accumulation result
+//     CO         — Final carry-out (overflow indicator)
+//     Sign        — MSB of SUM (2's-complement sign)
+//     Signproduct — CAND[7] XOR CB[7] (product sign for MUL mode)
+// -----------------------------------------------------------------------------
+module rrcam_8bit (
+    input  wire [7:0] CAND,
+    input  wire [7:0] CNOR,
+    input  wire [7:0] CB,
+    output wire [7:0] SUM,
+    output wire       CO,
+    output wire       Sign,
+    output wire       Signproduct
+);
+    wire [8:0] carry;
+    assign carry[0] = 1'b0;   // No initial carry-in
+
+    genvar i;
+    generate
+        for (i = 0; i < 8; i = i + 1) begin : GEN_RRCAM
+            rrcam_cell u_cell (
+                .CANDx (CAND[i]),
+                .CNORx (CNOR[i]),
+                .CBx   (CB[i]),
+                .CIx   (carry[i]),
+                .SUMx  (SUM[i]),
+                .COx   (carry[i+1])
+            );
+        end
+    endgenerate
+
+    assign CO          = carry[8];      // Overflow carry-out
+    assign Sign        = SUM[7];        // MSB = sign (2's complement)
+    assign Signproduct = CAND[7] ^ CB[7]; // Product sign (MSB XOR)
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 8: sram_ctrl  (SRAM Control Circuit)
+//
+//   Generates the write address (one-hot WA/WAB), precharge control (PreD),
+//   and write data bus (write_bus) from one of three sources:
+//     Priority 1 (highest): CIM/MUL mode  → drives row addresses from CIM FSM
+//     Priority 2          : BIST mode     → drives BIST pattern
+//     Priority 3 (lowest) : Normal mode   → drives user-supplied data
+//
+//   WA and WAB are registered (clocked) to model the address latch in real
+//   SRAM periphery. write_bus and wr_en_out are combinational for low latency.
+// -----------------------------------------------------------------------------
+module sram_ctrl (
+    input  wire        clk,
+    input  wire        rst_n,
+    // From CIM control
+    input  wire        Dffwr,        // Operand-latch strobe from CIM FSM
+    input  wire        Cimprec,      // Precision mode
+    input  wire        cim_active,   // CIM or MUL operation in progress
+    input  wire [2:0]  WL_auto,      // CIM auto row address
+    input  wire [2:0]  BL_auto,      // CIM auto column address
+    // Normal user interface
+    input  wire [2:0]  Word_addr,    // User row address
+    input  wire [2:0]  Bit_addr,     // User column address (unused in this ctrl)
+    input  wire [7:0]  Data_in,      // User write data
+    input  wire        wr_en,        // User write enable
+    // BIST
+    input  wire [2:0]  bword_addr,   // BIST row address
+    input  wire        BIST_data_in, // BIST data pattern (replicated to 8 bits)
+    input  wire        BIST_wr_en,   // BIST write enable
+    // Outputs
+    output reg  [2:0]  WS,           // Row select (binary, feeds row_decoder)
+    output reg  [7:0]  WA,           // One-hot write address (registered)
+    output reg  [7:0]  WAB,          // Complement of WA (registered)
+    output reg  [7:0]  PreD,         // Precharge control word (registered)
+    output reg  [7:0]  write_bus,    // Write data (combinational)
+    output reg         wr_en_out     // Qualified write enable (combinational)
+);
+    wire [7:0] bist_pattern = {8{BIST_data_in}};
+
+    // Combinational: select write source based on priority
+    always @(*) begin
+        if (cim_active) begin
+            WS        = WL_auto;
+            write_bus = 8'h00;
+            wr_en_out = 1'b0;     // CIM reads rows; write-back handled by wb_circuit
+        end else if (BIST_wr_en) begin
+            WS        = bword_addr;
+            write_bus = bist_pattern;
+            wr_en_out = 1'b1;
+        end else begin
+            WS        = Word_addr;
+            write_bus = Data_in;
+            wr_en_out = wr_en;
+        end
+    end
+
+    // Registered: address one-hot and precharge
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            WA   <= 8'h00;
+            WAB  <= 8'hFF;
+            PreD <= 8'hFF;
+        end else begin
+            WA   <= (8'h01 << WS);
+            WAB  <= ~(8'h01 << WS);
+            // PreD = 0x00 during write (precharge released); 0xFF when idle
+            if (wr_en_out || BIST_wr_en)
+                PreD <= 8'h00;
+            else
+                PreD <= 8'hFF;
+        end
+    end
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 9: cim_ctrl  (CIM Control Circuit — FSM)
+//
+//   Five-state Mealy FSM that orchestrates a complete MAC pipeline:
+//
+//     IDLE       → Wait for MUL or CIM assertion
+//     READ_OPS   → Assert row addresses; strobe Dffwr to latch operands
+//     EXECUTE    → Assert DffC to capture adder result
+//     WRITE_BACK → Assert Dffwrb; wb_circuit writes result to SRAM
+//     DONE_ST    → Assert done; hold until input de-asserted → back to IDLE
+//
+//   New vs. original code:
+//     - Address width corrected to 3 bits (matching arch diagram)
+//     - WL_addend output added (addend row for dual SRAM read)
+//     - Dffwr correctly asserted in READ_OPS
+//     - BL_auto set in WRITE_BACK
+//     - Is_Mul forwarded for write-back mux
+//     - done output added
+// -----------------------------------------------------------------------------
+module cim_ctrl (
+    input  wire        clk,
+    input  wire        rst_n,
+    // Operation selects
+    input  wire        MUL,           // Multiply mode
+    input  wire        CIM,           // Accumulate mode
+    // Address operands
+    input  wire [2:0]  Augend_addr,   // SRAM row of operand A
+    input  wire [2:0]  Addend_addr,   // SRAM row of operand B
+    input  wire [2:0]  Product_addr,  // SRAM row for MAC result
+    input  wire [2:0]  Sign_addr,     // SRAM row for MUL sign result
+    // Control outputs to wb_circuit
+    output reg         Dffwr,         // Latch operand addresses
+    output reg         Cimprec,       // Precision select (1=with carry)
+    output reg         WRSel,         // Write-back source (1=arithmetic)
+    output reg         Dffwrb,        // Write-back strobe
+    output reg         DffC,          // Capture adder result
+    // Row address outputs
+    output reg  [2:0]  WL_auto,       // Augend row (also write-back destination)
+    output reg  [2:0]  WL_addend,     // Addend row (for dual-row SRAM read)
+    output reg  [2:0]  BL_auto,       // Column address
+    output reg  [2:0]  S_addr,        // Write-back destination row
+    // Flags
+    output reg         Is_Mul,        // Forwarded MUL flag to wb_circuit
+    output reg         done,          // Operation complete
+    // Data bus mirror
+    output wire [2:0]  CIM_Data       // Mirrors WL_auto (used as data token)
+);
+    // FSM state encoding
+    localparam [2:0]
+        IDLE       = 3'd0,
+        READ_OPS   = 3'd1,
+        EXECUTE    = 3'd2,
+        WRITE_BACK = 3'd3,
+        DONE_ST    = 3'd4;
+
+    reg [2:0] state, nstate;
+
+    // State register (synchronous, async reset)
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) state <= IDLE;
+        else        state <= nstate;
+    end
+
+    // Combinational next-state + output logic
+    always @(*) begin
+        // ---- Default outputs (avoid latches) ----
+        nstate    = state;
+        Dffwr     = 1'b0;
+        Cimprec   = 1'b1;   // default: full precision
+        WRSel     = 1'b0;
+        Dffwrb    = 1'b0;
+        DffC      = 1'b0;
+        WL_auto   = 3'd0;
+        WL_addend = 3'd0;
+        BL_auto   = 3'd0;
+        S_addr    = 3'd0;
+        Is_Mul    = MUL;
+        done      = 1'b0;
+
+        case (state)
+            // ------------------------------------------------
+            IDLE: begin
+                if (MUL || CIM)
+                    nstate = READ_OPS;
+            end
+
+            // ------------------------------------------------
+            // Activate both row addresses so SRAM dual-reads
+            // BL_A and BL_B simultaneously. Dffwr strobes the
+            // operand address registers in wb_circuit.
+            // ------------------------------------------------
+            READ_OPS: begin
+                WL_auto   = Augend_addr;
+                WL_addend = Addend_addr;
+                Dffwr     = 1'b1;         // latch operand rows
+                nstate    = EXECUTE;
+            end
+
+            // ------------------------------------------------
+            // Keep row addresses asserted so CAND/CNOR and SUM
+            // are stable. DffC captures the adder output.
+            // Precision: Cimprec=1 for MAC (carry retained),
+            //            Cimprec=0 for MUL (discard carry).
+            // ------------------------------------------------
+            EXECUTE: begin
+                WL_auto   = Augend_addr;
+                WL_addend = Addend_addr;
+                DffC      = 1'b1;
+                Cimprec   = ~MUL;
+                nstate    = WRITE_BACK;
+            end
+
+            // ------------------------------------------------
+            // Drive write-back address; Dffwrb strobes wb_circuit
+            // to capture and forward result to SRAM write port.
+            // MUL → write sign to Sign_addr row
+            // CIM → write MAC result to Product_addr row
+            // ------------------------------------------------
+            WRITE_BACK: begin
+                WRSel     = 1'b1;
+                Dffwrb    = 1'b1;
+                S_addr    = MUL ? Sign_addr   : Product_addr;
+                WL_auto   = MUL ? Sign_addr   : Product_addr;
+                BL_auto   = 3'd0;
+                nstate    = DONE_ST;
+            end
+
+            // ------------------------------------------------
+            DONE_ST: begin
+                done = 1'b1;
+                if (!MUL && !CIM)
+                    nstate = IDLE;
+            end
+
+            default: nstate = IDLE;
+        endcase
+    end
+
+    assign CIM_Data = WL_auto;   // Mirror WL_auto as data token on CIM bus
+endmodule
+
+
+// -----------------------------------------------------------------------------
+// MODULE 10: wb_circuit  (Auto-Switching Write-Back Circuit)
+//
+//   Selects the correct result based on operation mode and precision,
+//   then presents it to the SRAM write port for one clock cycle.
+//
+//   Result selection (combinational):
+//     MUL mode          → {7'b0, Signproduct}   (1-bit sign of product)
+//     CIM + Cimprec=1   → {CO, SUM[6:0]}        (carry included in MSB)
+//     CIM + Cimprec=0   → SUM                   (raw 8-bit sum)
+//     WRSel=0           → CIM_Data_bus           (passthrough / non-compute)
+//
+//   Dffwrb: one-cycle strobe that captures and asserts wr_en_wb for SRAM.
+// -----------------------------------------------------------------------------
+module wb_circuit (
+    input  wire        clk,
+    input  wire        rst_n,
+    // Control from CIM FSM
+    input  wire        Cimprec,
+    input  wire        WRSel,
+    input  wire        Is_Mul,
+    input  wire        Dffwrb,       // Write-back strobe (one clock)
+    input  wire        DffC,         // Capture strobe (latch arith result)
+    input  wire [2:0]  S_addr,       // Destination row address
+    input  wire [2:0]  WL_auto,      // Alternate row address
+    input  wire [2:0]  BL_auto,      // Column address
+    // From FS-GDI adder
+    input  wire [7:0]  SUM,
+    input  wire        CO,
+    input  wire        Sign,
+    input  wire        Signproduct,
+    // Passthrough data bus
+    input  wire [7:0]  CIM_Data_bus,
+    // Write-back outputs → SRAM write port
+    output reg  [7:0]  Write_Data_Bus,
+    output reg  [2:0]  WL_out,
+    output reg  [2:0]  BL_out,
+    output reg         wr_en_wb       // Asserted for one cycle on write-back
+);
+    // ---- Combinational result selection ----
+    wire [7:0] arith_result;
+    assign arith_result = Is_Mul  ? {7'b000_0000, Signproduct} :
+                          Cimprec ? {CO, SUM[6:0]}              :
+                                    SUM;
+
+    wire [7:0] next_data;
+    assign next_data = WRSel ? arith_result : CIM_Data_bus;
+
+    // ---- Registered write-back ----
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            Write_Data_Bus <= 8'h00;
+            WL_out         <= 3'd0;
+            BL_out         <= 3'd0;
+            wr_en_wb       <= 1'b0;
+        end else begin
+            wr_en_wb <= 1'b0;   // Default: no write (one-cycle pulse only)
+
+            if (Dffwrb) begin
+                Write_Data_Bus <= next_data;
+                WL_out         <= WRSel ? S_addr : WL_auto;
+                BL_out         <= BL_auto;
+                wr_en_wb       <= 1'b1;
+            end
+        end
+    end
+endmodule
+// ========================= END OF cim_submodules.v ==========================
+
+// =============================================================================
+// FILE: cim_top.v
+// DESC: Top-level CIM MAC Core.
+//       Instantiates and wires all submodules per the architecture diagram:
+//
+//         User/CIM inputs
+//              │
+//         ┌────▼────────┐    ┌──────────────┐
+//         │ CIM Control │    │ SRAM Control │◄── User/BIST write
+//         │  (FSM)      │    │  Circuit     │
+//         └────┬────────┘    └──────┬───────┘
+//              │ WL_auto             │ WS,WA,WAB,write_bus
+//              │ WL_addend           │
+//         ┌────▼────────────────────▼───────┐
+//         │      Row Decoders (×3)          │
+//         └────┬──────────────┬─────────────┘
+//              │              │
+//         ┌────▼──────────────▼─────────────┐
+//         │         SRAM Array 8×8          │
+//         └────┬──────────────┬─────────────┘
+//              │BL            │BL_A, BL_B
+//         ┌────▼────┐    ┌────▼────────────┐
+//         │Col Dec  │    │Current Comp.    │
+//         │Col Sel  │    │(CAND, CNOR)     │
+//         └────┬────┘    └────┬────────────┘
+//              │Data_out      │
+//                        ┌────▼────────────┐
+//                        │ FS-GDI Adder    │ ◄─ CB (accumulator register)
+//                        │ (rrcam_8bit)    │
+//                        └────┬────────────┘
+//                             │SUM, CO, Sign
+//                        ┌────▼────────────┐
+//                        │  Write-Back     │
+//                        │  (wb_circuit)   │
+//                        └────┬────────────┘
+//                             │Write_Data_Bus, WL_out, wr_en_wb
+//                          (write arbitration)
+//                             │
+//                         SRAM Array (write port)
+//
+//   The accumulator register (acc_reg) stores SUM on DffC and feeds it back
+//   as CB to the adder on the next MAC cycle — enabling multi-MAC chaining.
+//
+// Verilator command:
+//   verilator --cc --exe --build --timing \
+//     cim_submodules.v cim_top.v sim_main.cpp \
+//     -o cim_sim --Wno-fatal
+// =============================================================================
+`timescale 1ns / 1ps
+
+module cim_top (
+    input  wire        clk,
+    input  wire        rst_n,
+
+    // ---- CIM / MAC operation interface ----
+    input  wire        MUL,              // Trigger: 1-bit multiplication
+    input  wire        CIM,              // Trigger: CIM accumulate (MAC)
+    input  wire [2:0]  Augend_addr,      // SRAM row of operand A
+    input  wire [2:0]  Addend_addr,      // SRAM row of operand B
+    input  wire [2:0]  Product_addr,     // SRAM row to write MAC result
+    input  wire [2:0]  Sign_addr,        // SRAM row to write MUL sign result
+
+    // ---- Normal SRAM user interface ----
+    input  wire [2:0]  Word_addr,        // Row address for normal R/W
+    input  wire [2:0]  Bit_addr,         // Column address for normal R/W
+    input  wire [7:0]  Data_in,          // Normal write data
+    input  wire        wr_en,            // Normal write enable
+
+    // ---- BIST interface ----
+    input  wire [2:0]  bword_addr,       // BIST row address
+    input  wire        BIST_data_in,     // BIST fill pattern (0 or 1, replicated)
+    input  wire        BIST_wr_en,       // BIST write enable
+
+    // ---- Read / result outputs ----
+    output wire        Data_out,         // Column-selected single-bit read
+    output wire [7:0]  SUM_out,          // 8-bit adder sum (combinational)
+    output wire        CO_out,           // Final carry-out
+    output wire        Sign_out,         // MSB of SUM (sign bit)
+    output wire        Signproduct_out,  // XOR of MSBs (product sign for MUL)
+    output wire        done              // Asserted when MAC/MUL complete
+);
+
+    // =========================================================================
+    //  Internal Wires
+    // =========================================================================
+
+    // ---- CIM FSM outputs ----
+    wire        Dffwr;
+    wire        Cimprec;
+    wire        WRSel;
+    wire        Dffwrb;
+    wire        DffC;
+    wire [2:0]  WL_auto;      // Augend row (& write-back destination)
+    wire [2:0]  WL_addend;    // Addend row
+    wire [2:0]  BL_auto;      // Column address from FSM
+    wire [2:0]  S_addr;       // Write-back destination row
+    wire        Is_Mul;
+    wire [2:0]  CIM_Data;
+    wire        cim_active;   // CIM or MUL in progress
+
+    // ---- SRAM Control outputs ----
+    wire [2:0]  WS;           // Binary row select → row_decoder
+    wire [7:0]  WA_sram;      // One-hot write address (registered)
+    wire [7:0]  WAB_sram;     // Complement of WA
+    wire [7:0]  PreD;         // Precharge control word
+    wire [7:0]  write_bus_sram;
+    wire        wr_en_sram;
+
+    // ---- Row Decoder outputs (three decoders: normal, augend, addend) ----
+    wire [7:0]  WL_normal;    // Normal read/write row
+    wire [7:0]  WL_A;         // CIM augend row
+    wire [7:0]  WL_B;         // CIM addend row
+
+    // ---- SRAM Array outputs ----
+    wire [7:0]  BL;           // Normal bit-lines
+    wire [7:0]  BL_A;         // Augend row bit-lines
+    wire [7:0]  BL_B;         // Addend row bit-lines
+
+    // ---- Column decoder ----
+    wire [7:0]  Col_EN;
+
+    // ---- Current Compensation ----
+    wire [7:0]  CAND;
+    wire [7:0]  CNOR;
+
+    // ---- FS-GDI Adder outputs ----
+    wire [7:0]  SUM;
+    wire        CO;
+    wire        Sign;
+    wire        Signproduct;
+
+    // ---- Write-Back Circuit outputs ----
+    wire [7:0]  Write_Data_Bus;
+    wire [2:0]  WL_wb;
+    wire [2:0]  BL_wb;
+    wire        wr_en_wb;
+
+    // ---- Write arbitration ----
+    // Write-back from CIM FSM takes priority over normal user writes.
+    wire [7:0]  final_WA;
+    wire [7:0]  final_write_bus;
+    wire        final_wr_en;
+
+    // ---- Accumulator register ----
+    // Feeds back SUM as CB (column bias) on next MAC cycle.
+    // Cleared on reset or when not in CIM/MUL mode.
+    reg  [7:0]  acc_reg;
+
+    // =========================================================================
+    //  Logic
+    // =========================================================================
+
+    assign cim_active = CIM | MUL;
+
+    // Accumulator: latched on DffC (EXECUTE state), feeds adder CB next cycle
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            acc_reg <= 8'h00;
+        else if (DffC)
+            acc_reg <= SUM;
+        else if (!cim_active)
+            acc_reg <= 8'h00;   // Clear accumulator between operations
+    end
+
+    // Write arbitration: wb_circuit write takes priority over sram_ctrl write
+    assign final_wr_en     = wr_en_wb | wr_en_sram;
+    assign final_WA        = wr_en_wb ? (8'h01 << WL_wb) : WA_sram;
+    assign final_write_bus = wr_en_wb ? Write_Data_Bus    : write_bus_sram;
+
+    // =========================================================================
+    //  Module Instantiations
+    // =========================================================================
+
+    // ---- CIM Control FSM ----
+    cim_ctrl u_cim_ctrl (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .MUL          (MUL),
+        .CIM          (CIM),
+        .Augend_addr  (Augend_addr),
+        .Addend_addr  (Addend_addr),
+        .Product_addr (Product_addr),
+        .Sign_addr    (Sign_addr),
+        .Dffwr        (Dffwr),
+        .Cimprec      (Cimprec),
+        .WRSel        (WRSel),
+        .Dffwrb       (Dffwrb),
+        .DffC         (DffC),
+        .WL_auto      (WL_auto),
+        .WL_addend    (WL_addend),
+        .BL_auto      (BL_auto),
+        .S_addr       (S_addr),
+        .Is_Mul       (Is_Mul),
+        .done         (done),
+        .CIM_Data     (CIM_Data)
+    );
+
+    // ---- SRAM Control ----
+    sram_ctrl u_sram_ctrl (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .Dffwr        (Dffwr),
+        .Cimprec      (Cimprec),
+        .cim_active   (cim_active),
+        .WL_auto      (WL_auto),
+        .BL_auto      (BL_auto),
+        .Word_addr    (Word_addr),
+        .Bit_addr     (Bit_addr),
+        .Data_in      (Data_in),
+        .wr_en        (wr_en),
+        .bword_addr   (bword_addr),
+        .BIST_data_in (BIST_data_in),
+        .BIST_wr_en   (BIST_wr_en),
+        .WS           (WS),
+        .WA           (WA_sram),
+        .WAB          (WAB_sram),
+        .PreD         (PreD),
+        .write_bus    (write_bus_sram),
+        .wr_en_out    (wr_en_sram)
+    );
+
+    // ---- Row Decoder: Normal SRAM access ----
+    row_decoder_3to8 u_rdec_normal (
+        .addr (WS),
+        .WL   (WL_normal)
+    );
+
+    // ---- Row Decoder: CIM Augend Row ----
+    row_decoder_3to8 u_rdec_A (
+        .addr (WL_auto),
+        .WL   (WL_A)
+    );
+
+    // ---- Row Decoder: CIM Addend Row ----
+    row_decoder_3to8 u_rdec_B (
+        .addr (WL_addend),
+        .WL   (WL_B)
+    );
+
+    // ---- SRAM Array (8 × 8 bits) ----
+    sram_8x8_array u_sram (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .WA        (final_WA),
+        .write_bus (final_write_bus),
+        .wr_en     (final_wr_en),
+        .WL        (WL_normal),
+        .BL        (BL),
+        .WL_A      (WL_A),
+        .BL_A      (BL_A),
+        .WL_B      (WL_B),
+        .BL_B      (BL_B)
+    );
+
+    // ---- Column Decoder ----
+    col_decoder_3to8 u_cdec (
+        .WS     (WS),
+        .Col_EN (Col_EN)
+    );
+
+    // ---- Column Selector (single-bit read output) ----
+    col_selector_8to1 u_csel (
+        .bitlines (BL),
+        .sel_en   (Col_EN),
+        .data_out (Data_out)
+    );
+
+    // ---- Current Compensation Circuit ----
+    // Converts dual-row BL activation to CAND / CNOR digital words
+    current_comp u_cc (
+        .BL_A (BL_A),
+        .BL_B (BL_B),
+        .CAND (CAND),
+        .CNOR (CNOR)
+    );
+
+    // ---- FS-GDI 8-bit Ripple-Carry Adder ----
+    // CB = acc_reg (accumulated result from previous MAC cycle)
+    // For first operation: acc_reg = 0 → CB = 0
+    rrcam_8bit u_adder (
+        .CAND        (CAND),
+        .CNOR        (CNOR),
+        .CB          (acc_reg),     // Accumulator feedback
+        .SUM         (SUM),
+        .CO          (CO),
+        .Sign        (Sign),
+        .Signproduct (Signproduct)
+    );
+
+    // ---- Auto-Switching Write-Back Circuit ----
+    wb_circuit u_wb (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .Cimprec       (Cimprec),
+        .WRSel         (WRSel),
+        .Is_Mul        (Is_Mul),
+        .Dffwrb        (Dffwrb),
+        .DffC          (DffC),
+        .S_addr        (S_addr),
+        .WL_auto       (WL_auto),
+        .BL_auto       (BL_auto),
+        .SUM           (SUM),
+        .CO            (CO),
+        .Sign          (Sign),
+        .Signproduct   (Signproduct),
+        .CIM_Data_bus  ({5'b00000, CIM_Data}),
+        .Write_Data_Bus(Write_Data_Bus),
+        .WL_out        (WL_wb),
+        .BL_out        (BL_wb),
+        .wr_en_wb      (wr_en_wb)
+    );
+
+    // =========================================================================
+    //  Output assignments
+    // =========================================================================
+    assign SUM_out         = SUM;
+    assign CO_out          = CO;
+    assign Sign_out        = Sign;
+    assign Signproduct_out = Signproduct;
+
+endmodule
+// ========================= END OF cim_top.v ==================================
+
+// =============================================================================
+// FILE: cim_tb.v
+// DESC: Comprehensive testbench for cim_top.
+//       Tests: SRAM write, CIM MAC, MUL, BIST, accumulator chain.
+//
+// Simulation (Icarus Verilog):
+//   iverilog -o cim_sim cim_submodules.v cim_top.v cim_tb.v && vvp cim_sim
+//
+// Simulation (Verilator with --timing):
+//   verilator --cc --exe --build --timing \
+//     cim_submodules.v cim_top.v cim_tb.v \
+//     -o cim_sim --Wno-fatal
+//   ./obj_dir/cim_sim
+//
+// VCD Waveform (add +define+DUMP_VCD when compiling):
+//   iverilog -DDUMP_VCD -o cim_sim cim_submodules.v cim_top.v cim_tb.v
+// =============================================================================
+`timescale 1ns / 1ps
+
+module cim_tb;
+
+    // =========================================================================
+    //  Clock & Reset
+    // =========================================================================
+    reg clk;
+    reg rst_n;
+
+    initial clk = 1'b0;
+    always  #5 clk = ~clk;   // 100 MHz clock (10 ns period)
+
+    // =========================================================================
+    //  DUT Port Signals
+    // =========================================================================
+    reg        MUL;
+    reg        CIM;
+    reg [2:0]  Augend_addr;
+    reg [2:0]  Addend_addr;
+    reg [2:0]  Product_addr;
+    reg [2:0]  Sign_addr;
+    reg [2:0]  Word_addr;
+    reg [2:0]  Bit_addr;
+    reg [7:0]  Data_in;
+    reg        wr_en;
+    reg [2:0]  bword_addr;
+    reg        BIST_data_in;
+    reg        BIST_wr_en;
+
+    wire        Data_out;
+    wire [7:0]  SUM_out;
+    wire        CO_out;
+    wire        Sign_out;
+    wire        Signproduct_out;
+    wire        done;
+
+    // =========================================================================
+    //  DUT Instantiation
+    // =========================================================================
+    cim_top dut (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .MUL             (MUL),
+        .CIM             (CIM),
+        .Augend_addr     (Augend_addr),
+        .Addend_addr     (Addend_addr),
+        .Product_addr    (Product_addr),
+        .Sign_addr       (Sign_addr),
+        .Word_addr       (Word_addr),
+        .Bit_addr        (Bit_addr),
+        .Data_in         (Data_in),
+        .wr_en           (wr_en),
+        .bword_addr      (bword_addr),
+        .BIST_data_in    (BIST_data_in),
+        .BIST_wr_en      (BIST_wr_en),
+        .Data_out        (Data_out),
+        .SUM_out         (SUM_out),
+        .CO_out          (CO_out),
+        .Sign_out        (Sign_out),
+        .Signproduct_out (Signproduct_out),
+        .done            (done)
+    );
+
+    // =========================================================================
+    //  Test infrastructure
+    // =========================================================================
+    integer pass_cnt;
+    integer fail_cnt;
+
+    // Helper: Wait for N falling edges of clock
+    task wait_clk;
+        input integer n;
+        integer i;
+        begin
+            for (i = 0; i < n; i = i + 1)
+                @(negedge clk);
+        end
+    endtask
+
+    // Helper: Write one row to SRAM via normal user interface
+    task sram_write;
+        input [2:0] row;
+        input [7:0] data;
+        begin
+            @(negedge clk);
+            Word_addr = row;
+            Data_in   = data;
+            wr_en     = 1'b1;
+            @(negedge clk);
+            wr_en     = 1'b0;
+            Data_in   = 8'h00;
+        end
+    endtask
+
+    // Helper: Trigger CIM MAC and wait for done (with timeout)
+    task cim_mac;
+        input [2:0] aug;
+        input [2:0] add;
+        input [2:0] prod;
+        integer     timeout;
+        begin
+            @(negedge clk);
+            Augend_addr  = aug;
+            Addend_addr  = add;
+            Product_addr = prod;
+            CIM          = 1'b1;
+            timeout      = 0;
+            @(negedge clk);
+            // Poll done with timeout (max 20 cycles)
+            while (!done && timeout < 20) begin
+                @(negedge clk);
+                timeout = timeout + 1;
+            end
+            if (timeout >= 20)
+                $display("  [WARN] cim_mac: done not asserted within 20 cycles!");
+            @(negedge clk);
+            CIM = 1'b0;
+            @(negedge clk);   // let FSM return to IDLE
+        end
+    endtask
+
+    // Helper: Trigger MUL and wait for done
+    task cim_mul;
+        input [2:0] aug;
+        input [2:0] add;
+        input [2:0] sign_row;
+        integer     timeout;
+        begin
+            @(negedge clk);
+            Augend_addr = aug;
+            Addend_addr = add;
+            Sign_addr   = sign_row;
+            MUL         = 1'b1;
+            timeout     = 0;
+            @(negedge clk);
+            while (!done && timeout < 20) begin
+                @(negedge clk);
+                timeout = timeout + 1;
+            end
+            if (timeout >= 20)
+                $display("  [WARN] cim_mul: done not asserted within 20 cycles!");
+            @(negedge clk);
+            MUL = 1'b0;
+            @(negedge clk);
+        end
+    endtask
+
+    // Helper: Check and report
+    task check;
+        input [7:0]  actual;
+        input [7:0]  expected;
+        input [63:0] test_num;
+        begin
+            if (actual === expected) begin
+                $display("  [PASS] Test %0d: SUM=0x%02X  (expected 0x%02X)",
+                         test_num, actual, expected);
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("  [FAIL] Test %0d: SUM=0x%02X  (expected 0x%02X)",
+                         test_num, actual, expected);
+                fail_cnt = fail_cnt + 1;
+            end
+        end
+    endtask
+
+    // =========================================================================
+    //  Waveform Dump (conditional — compile with +define+DUMP_VCD)
+    // =========================================================================
+    `ifdef DUMP_VCD
+    initial begin
+        $dumpfile("cim_tb.vcd");
+        $dumpvars(0, cim_tb);
+    end
+    `endif
+
+    // =========================================================================
+    //  Timeout Watchdog
+    // =========================================================================
+    initial begin
+        #50000;
+        $display("[TIMEOUT] Simulation exceeded 50us — terminating.");
+        $finish;
+    end
+
+    // =========================================================================
+    //  Main Test Sequence
+    // =========================================================================
+    initial begin
+        // ---- Initialise all inputs ----
+        rst_n        = 1'b0;
+        MUL          = 1'b0;
+        CIM          = 1'b0;
+        Augend_addr  = 3'd0;
+        Addend_addr  = 3'd0;
+        Product_addr = 3'd0;
+        Sign_addr    = 3'd0;
+        Word_addr    = 3'd0;
+        Bit_addr     = 3'd0;
+        Data_in      = 8'h00;
+        wr_en        = 1'b0;
+        bword_addr   = 3'd0;
+        BIST_data_in = 1'b0;
+        BIST_wr_en   = 1'b0;
+        pass_cnt     = 0;
+        fail_cnt     = 0;
+
+        // ---- Release reset after 4 clock edges ----
+        repeat(4) @(posedge clk);
+        @(negedge clk);
+        rst_n = 1'b1;
+        @(negedge clk);
+
+        $display("");
+        $display("============================================================");
+        $display("  CIM MAC Core Testbench  —  100 MHz  —  8-bit SRAM 8×8");
+        $display("============================================================");
+
+        // ==================================================================
+        // TEST 1: SRAM write + readback sanity
+        //   Write 0xA5 to row 0, verify Data_out on column 0 = bit[0] of 0xA5 = 1
+        // ==================================================================
+        $display("");
+        $display("--- TEST 1: SRAM Write / Readback ---");
+        sram_write(3'd0, 8'hA5);   // row 0 = 1010_0101
+        sram_write(3'd1, 8'h5A);   // row 1 = 0101_1010
+        sram_write(3'd2, 8'hFF);   // row 2 = 1111_1111
+        sram_write(3'd3, 8'h00);   // row 3 = 0000_0000
+        sram_write(3'd4, 8'hF0);   // row 4 = 1111_0000
+        sram_write(3'd5, 8'h0F);   // row 5 = 0000_1111
+        $display("  Written: row0=0xA5 row1=0x5A row2=0xFF row3=0x00 row4=0xF0 row5=0x0F");
+
+        // Read column 0 of row 0 (bit 0 of 0xA5 = 1)
+        @(negedge clk);
+        Word_addr = 3'd0;
+        Bit_addr  = 3'd0;
+        @(negedge clk);
+        if (Data_out === 1'b1) begin
+            $display("  [PASS] Data_out col0/row0 = %b (expect 1)", Data_out);
+            pass_cnt = pass_cnt + 1;
+        end else begin
+            $display("  [FAIL] Data_out col0/row0 = %b (expect 1)", Data_out);
+            fail_cnt = fail_cnt + 1;
+        end
+
+        // Read column 1 of row 0 (bit 1 of 0xA5 = 0)
+        @(negedge clk);
+        Word_addr = 3'd0;
+        Bit_addr  = 3'd1;
+        @(negedge clk);
+        if (Data_out === 1'b0) begin
+            $display("  [PASS] Data_out col1/row0 = %b (expect 0)", Data_out);
+            pass_cnt = pass_cnt + 1;
+        end else begin
+            $display("  [FAIL] Data_out col1/row0 = %b (expect 0)", Data_out);
+            fail_cnt = fail_cnt + 1;
+        end
+
+        // ==================================================================
+        // TEST 2: CIM MAC — complementary rows
+        //   row0=0xA5 (1010_0101), row1=0x5A (0101_1010)
+        //   CAND = 0xA5 & 0x5A = 0x00  (no bit both 1)
+        //   CNOR = ~(0xA5 | 0x5A) = ~0xFF = 0x00 (all bits at least 1)
+        //   P = CAND ^ CNOR = 0x00   (XNOR all 0: every bit differs → XNOR=0)
+        //   SUM = P ^ CB ^ 0 = 0x00 ^ 0x00 = 0x00 (acc_reg=0 at start)
+        //   CO  = 0
+        //   Expected SUM = 0x00
+        // ==================================================================
+        $display("");
+        $display("--- TEST 2: CIM MAC — complementary rows (XNOR=0 expected) ---");
+        cim_mac(3'd0, 3'd1, 3'd6);
+        $display("  Row0=0xA5, Row1=0x5A → XNOR=0x00, CB=0x00");
+        $display("  SUM=0x%02X CO=%b Sign=%b", SUM_out, CO_out, Sign_out);
+        check(SUM_out, 8'h00, 2);
+
+        // ==================================================================
+        // TEST 3: CIM MAC — identical rows (all bits equal → XNOR=1 everywhere)
+        //   row4=0xF0, row5=0x0F — these differ on every bit
+        //   CAND = 0xF0 & 0x0F = 0x00
+        //   CNOR = ~(0xF0 | 0x0F) = ~0xFF = 0x00
+        //   P = 0x00 → SUM = 0x00 (all bits differ, XNOR=0 everywhere)
+        //   Now try rows 2 and 2 (same row: all bits 1)
+        //   CAND = 0xFF & 0xFF = 0xFF
+        //   CNOR = ~(0xFF | 0xFF) = 0x00
+        //   P = 0xFF ^ 0x00 = 0xFF   (XNOR=1 on every bit since identical)
+        //   CB  = acc_reg = 0x00 (reset between ops)
+        //   SUM = 0xFF ^ 0x00 ^ 0 = 0xFF, CO = 0
+        //   Expected SUM = 0xFF
+        // ==================================================================
+        $display("");
+        $display("--- TEST 3: CIM MAC — same row twice (XNOR=0xFF expected) ---");
+        // Re-write row 2 to 0xFF and row 7 to 0xFF to use as dual identical rows
+        sram_write(3'd2, 8'hFF);
+        sram_write(3'd7, 8'hFF);
+        cim_mac(3'd2, 3'd7, 3'd6);
+        $display("  Row2=0xFF, Row7=0xFF → XNOR=0xFF, CB=0x00");
+        $display("  SUM=0x%02X CO=%b", SUM_out, CO_out);
+        check(SUM_out, 8'hFF, 3);
+
+        // ==================================================================
+        // TEST 4: CIM MAC — all-zero rows (XNOR=1 since 0 XNOR 0 = 1)
+        //   row3=0x00, row3=0x00 (read same row twice)
+        //   CAND = 0x00 & 0x00 = 0x00
+        //   CNOR = ~(0x00 | 0x00) = 0xFF
+        //   P = 0x00 ^ 0xFF = 0xFF
+        //   CB = 0x00
+        //   SUM = 0xFF, CO = 0
+        // ==================================================================
+        $display("");
+        $display("--- TEST 4: CIM MAC — both rows all-zeros (XNOR=0xFF) ---");
+        sram_write(3'd3, 8'h00);
+        sram_write(3'd6, 8'h00);   // use row 6 as second copy of all-zeros
+        cim_mac(3'd3, 3'd6, 3'd6);
+        $display("  Row3=0x00, Row6=0x00 → XNOR=0xFF, CB=0x00");
+        $display("  SUM=0x%02X CO=%b", SUM_out, CO_out);
+        check(SUM_out, 8'hFF, 4);
+
+        // ==================================================================
+        // TEST 5: MUL operation
+        //   MUL writes Signproduct to Sign_addr row.
+        //   Signproduct = CAND[7] XOR CB[7]
+        //   row0=0xA5 (MSB=1), row1=0x5A (MSB=0)
+        //   CAND[7] = A5[7] & 5A[7] = 1 & 0 = 0
+        //   CB[7] = acc_reg[7] = 0
+        //   Signproduct = 0 XOR 0 = 0
+        //   wb_circuit writes {7'b0, Signproduct} = 0x00 to Sign row
+        // ==================================================================
+        $display("");
+        $display("--- TEST 5: MUL sign computation ---");
+        sram_write(3'd0, 8'hA5);
+        sram_write(3'd1, 8'h5A);
+        cim_mul(3'd0, 3'd1, 3'd7);
+        $display("  Row0=0xA5 (MSB=1), Row1=0x5A (MSB=0)");
+        $display("  Signproduct_out=%b (CAND[7] XOR CB[7] = 0 XOR 0 = 0)", Signproduct_out);
+        if (Signproduct_out === 1'b0) begin
+            $display("  [PASS] Signproduct = 0 as expected");
+            pass_cnt = pass_cnt + 1;
+        end else begin
+            $display("  [FAIL] Signproduct = %b (expected 0)", Signproduct_out);
+            fail_cnt = fail_cnt + 1;
+        end
+
+        // ==================================================================
+        // TEST 6: BIST — fill row with all-ones
+        // ==================================================================
+        $display("");
+        $display("--- TEST 6: BIST write all-ones to row 7 ---");
+        @(negedge clk);
+        bword_addr   = 3'd7;
+        BIST_data_in = 1'b1;
+        BIST_wr_en   = 1'b1;
+        @(negedge clk);
+        BIST_wr_en   = 1'b0;
+        @(negedge clk);
+        // Verify by reading back column 0 (should be 1)
+        Word_addr = 3'd7;
+        Bit_addr  = 3'd0;
+        @(negedge clk);
+        @(negedge clk);
+        if (Data_out === 1'b1) begin
+            $display("  [PASS] BIST row7 col0 = %b (expect 1)", Data_out);
+            pass_cnt = pass_cnt + 1;
+        end else begin
+            $display("  [FAIL] BIST row7 col0 = %b (expect 1)", Data_out);
+            fail_cnt = fail_cnt + 1;
+        end
+
+        // BIST fill with all-zeros
+        @(negedge clk);
+        bword_addr   = 3'd7;
+        BIST_data_in = 1'b0;
+        BIST_wr_en   = 1'b1;
+        @(negedge clk);
+        BIST_wr_en = 1'b0;
+        @(negedge clk);
+        Word_addr = 3'd7;
+        @(negedge clk);
+        @(negedge clk);
+        if (Data_out === 1'b0) begin
+            $display("  [PASS] BIST row7 col0 = %b (expect 0 after zero-fill)", Data_out);
+            pass_cnt = pass_cnt + 1;
+        end else begin
+            $display("  [FAIL] BIST row7 col0 = %b (expect 0 after zero-fill)", Data_out);
+            fail_cnt = fail_cnt + 1;
+        end
+
+        // ==================================================================
+        // TEST 7: Back-to-back CIM MAC — accumulator chain
+        //   MAC1: row2(0xFF) XNOR row7(0x00) → CNOR part:
+        //     CAND = 0xFF & 0x00 = 0x00
+        //     CNOR = ~(0xFF | 0x00) = 0x00
+        //     P = 0x00 (all bits differ: 1 vs 0)
+        //     SUM1 = 0x00, acc_reg → 0x00
+        //   MAC2: row7(0x00) XNOR row7(0x00):
+        //     CAND = 0x00, CNOR = 0xFF, P = 0xFF
+        //     SUM2 = 0xFF ^ acc_reg(0x00) = 0xFF
+        // ==================================================================
+        $display("");
+        $display("--- TEST 7: Back-to-back MAC accumulator chain ---");
+        sram_write(3'd2, 8'hFF);
+        sram_write(3'd7, 8'h00);
+        // MAC 1: row2 XNOR row7 (all differ → SUM=0x00)
+        cim_mac(3'd2, 3'd7, 3'd6);
+        $display("  MAC1: 0xFF XNOR 0x00 → SUM=0x%02X (expect 0x00)", SUM_out);
+        // MAC 2: row7 XNOR row7 (all equal → SUM=0xFF) + acc from MAC1=0x00
+        sram_write(3'd5, 8'h00);
+        cim_mac(3'd7, 3'd5, 3'd6);
+        $display("  MAC2: 0x00 XNOR 0x00 + acc=0x00 → SUM=0x%02X (expect 0xFF)", SUM_out);
+        check(SUM_out, 8'hFF, 7);
+
+        // ==================================================================
+        // TEST 8: Carry-out test
+        //   Write 0xFF to two rows; run MAC with CB (acc_reg) = 0xFF after prev
+        //   P = 0xFF, CB = SUM from prev (0xFF), CI=0
+        //   SUM[0] = 1^1^0 = 0, CO[0]=1
+        //   ... ripple carry propagates fully
+        //   0xFF + 0xFF = 0x1FE → SUM=0xFE, CO=1
+        // ==================================================================
+        $display("");
+        $display("--- TEST 8: Carry-out propagation ---");
+        sram_write(3'd0, 8'hFF);
+        sram_write(3'd1, 8'hFF);
+        // First MAC: P=0xFF, CB=acc(0xFF from test7 MAC2)... wait acc was reset
+        // between operations. Let's force it:
+        // Run one MAC with identical rows to get acc=0xFF
+        cim_mac(3'd0, 3'd1, 3'd6);   // P=0xFF, acc_in=0 → SUM=0xFF
+        $display("  Primer MAC: SUM=0x%02X (loading acc_reg=0xFF)", SUM_out);
+        // Now run again: P=0xFF, acc=0xFF → 0xFF+0xFF: SUM=0xFE CO=1
+        cim_mac(3'd0, 3'd1, 3'd6);
+        $display("  Carry MAC:  P=0xFF + CB=0xFF → SUM=0x%02X CO=%b (expect 0xFE, CO=1)",
+                 SUM_out, CO_out);
+        if (SUM_out === 8'hFE && CO_out === 1'b1) begin
+            $display("  [PASS] SUM=0xFE CO=1");
+            pass_cnt = pass_cnt + 1;
+        end else begin
+            $display("  [FAIL] SUM=0x%02X CO=%b (expected SUM=0xFE CO=1)", SUM_out, CO_out);
+            fail_cnt = fail_cnt + 1;
+        end
+
+        // ==================================================================
+        // Summary
+        // ==================================================================
+        $display("");
+        $display("============================================================");
+        $display("  Simulation Complete");
+        $display("  PASS: %0d   FAIL: %0d   TOTAL: %0d",
+                 pass_cnt, fail_cnt, pass_cnt + fail_cnt);
+        $display("============================================================");
+
+        #20;
+        $finish;
+    end
+
+endmodule
+// ========================= END OF cim_tb.v ===================================
